@@ -1,0 +1,3 @@
+.esphome/
+build/
+components/*/__pycache__/

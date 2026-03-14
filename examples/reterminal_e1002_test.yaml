@@ -1,0 +1,101 @@
+esphome:
+  name: reterminal-sd-test
+
+esp32:
+  board: esp32-s3-devkitc-1
+  framework:
+    type: esp-idf
+    advanced:
+      disable_vfs_support_dir: false
+      include_builtin_idf_components:
+        - fatfs
+        - sdmmc
+        - esp_driver_sdspi
+        - esp_driver_spi
+
+psram:
+  mode: octal
+  speed: 80MHz
+
+external_components:
+  - source:
+      type: local
+      path: ../components
+    components: [spi_sd_storage, random_sd_image]
+
+spi:
+  clk_pin: GPIO7
+  mosi_pin: GPIO9
+  miso_pin: GPIO8
+
+logger:
+  baud_rate: 115200
+  hardware_uart: UART0
+
+font:
+  - file: "gfonts://Roboto"
+    id: test_font
+    size: 24
+
+spi_sd_storage:
+  id: sd_storage
+  clk_pin: 7
+  miso_pin: 8
+  mosi_pin: 9
+  cs_pin: 14
+  enable_pin: 16
+  detect_pin: 15
+
+globals:
+  - id: refresh_requested
+    type: bool
+    restore_value: no
+    initial_value: 'true'
+
+binary_sensor:
+  - platform: gpio
+    pin:
+      number: GPIO3
+      mode: INPUT_PULLUP
+      inverted: true
+    name: "Green Button"
+    on_press:
+      then:
+        - lambda: |-
+            if (!id(bg_loader).is_loading()) {
+              id(refresh_requested) = true;
+              id(bg_loader).request_refresh();
+            }
+
+random_sd_image:
+  id: bg_loader
+  storage_id: sd_storage
+  directory: /images
+
+interval:
+  - interval: 500ms
+    then:
+      - if:
+          condition:
+            lambda: 'return id(refresh_requested) && id(bg_loader).has_pending_frame();'
+          then:
+            - lambda: |-
+                id(bg_loader).commit_refresh();
+                id(refresh_requested) = false;
+            - component.update: epaper_display
+  - interval: 24h
+    then:
+      - lambda: |-
+          id(refresh_requested) = true;
+          id(bg_loader).request_refresh();
+
+display:
+  - platform: epaper_spi
+    id: epaper_display
+    model: Seeed-reTerminal-E1002
+    update_interval: never
+    lambda: |-
+      if (!id(bg_loader).draw_committed(it)) {
+        it.fill(Color(255, 255, 255));
+        it.print(400, 240, id(test_font), TextAlign::CENTER, "BMP draw failed");
+      }
