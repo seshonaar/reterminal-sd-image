@@ -62,7 +62,7 @@ binary_sensor:
     on_press:
       then:
         - lambda: |-
-            if (!id(bg_loader).is_loading()) {
+            if (!id(refresh_requested) && !id(bg_loader).is_loading()) {
               id(refresh_requested) = true;
               id(bg_loader).request_refresh();
             }
