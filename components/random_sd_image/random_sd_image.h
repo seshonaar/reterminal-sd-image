@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstdio>
 #include <cstdint>
 #include <string>
 
@@ -17,6 +18,8 @@ class RandomSdImage : public Component {
   void set_storage(spi_sd_storage::SpiSdStorage *storage) { this->storage_ = storage; }
   void set_directory(const std::string &directory) { this->directory_ = directory; }
 
+  void block_prefetch_for(uint32_t duration_ms);
+  void ensure_prefetch();
   void request_refresh();
   bool is_ready() const { return this->committed_ready_; }
   bool is_loading() const { return this->bmp_loading_; }
@@ -28,6 +31,7 @@ class RandomSdImage : public Component {
   void dump_config() override;
 
  protected:
+  bool start_next_image_load_();
   bool read_selected_bmp_info_();
   bool begin_load_selected_bmp_();
   bool continue_load_selected_bmp_();
@@ -39,6 +43,8 @@ class RandomSdImage : public Component {
   spi_sd_storage::SpiSdStorage *storage_{nullptr};
   std::string directory_;
   std::string selected_path_;
+  std::string committed_path_;
+  FILE *bmp_file_{nullptr};
   uint8_t *pending_buffer_{nullptr};
   size_t pending_buffer_size_{0};
   int16_t *error_curr_{nullptr};
@@ -50,6 +56,7 @@ class RandomSdImage : public Component {
   bool bmp_loaded_{false};
   bool bmp_loading_{false};
   bool committed_ready_{false};
+  bool prefetch_blocked_{false};
   int32_t width_{0};
   int32_t height_{0};
   uint16_t bits_per_pixel_{0};

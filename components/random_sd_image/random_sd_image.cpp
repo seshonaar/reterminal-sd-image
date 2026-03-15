@@ -69,10 +69,99 @@ void RandomSdImage::release_buffer_(uint8_t *&buffer, size_t &buffer_size, int16
 }
 
 void RandomSdImage::reset_buffer_() {
+  if (this->bmp_file_ != nullptr) {
+    fclose(this->bmp_file_);
+    this->bmp_file_ = nullptr;
+  }
   this->release_buffer_(this->pending_buffer_, this->pending_buffer_size_, this->error_curr_, this->error_next_);
   this->bmp_loaded_ = false;
   this->bmp_loading_ = false;
   this->load_row_ = 0;
+}
+
+bool RandomSdImage::start_next_image_load_() {
+  if (this->prefetch_blocked_) {
+    ESP_LOGI(TAG, "Prefetch start skipped because display cooldown is active");
+    return false;
+  }
+  if (this->storage_ == nullptr || !this->storage_->is_mounted()) {
+    ESP_LOGW(TAG, "Cannot load image because storage is not mounted");
+    return false;
+  }
+  if (this->bmp_loading_) {
+    return false;
+  }
+
+  const auto &paths = this->storage_->get_image_paths();
+  if (paths.empty()) {
+    ESP_LOGW(TAG, "No BMP files found in %s", this->directory_.c_str());
+    return false;
+  }
+
+  this->selected_path_.clear();
+  if (paths.size() == 1) {
+    this->selected_path_ = paths.front();
+  } else {
+    for (size_t attempt = 0; attempt < 8; attempt++) {
+      std::string candidate = this->storage_->get_random_image_path();
+      if (!candidate.empty() && candidate != this->committed_path_) {
+        this->selected_path_ = candidate;
+        break;
+      }
+    }
+    if (this->selected_path_.empty()) {
+      for (const auto &path : paths) {
+        if (path != this->committed_path_) {
+          this->selected_path_ = path;
+          break;
+        }
+      }
+    }
+  }
+
+  if (this->selected_path_.empty()) {
+    ESP_LOGW(TAG, "Could not choose a BMP path for prefetch");
+    return false;
+  }
+
+  ESP_LOGI(TAG, "Preparing next image: %s", this->selected_path_.c_str());
+  if (!this->read_selected_bmp_info_()) {
+    return false;
+  }
+
+  ESP_LOGI(TAG, "BMP info: %ldx%ld, %u bpp, pixel offset %u, DIB header %u",
+           static_cast<long>(this->width_), static_cast<long>(this->height_), this->bits_per_pixel_,
+           static_cast<unsigned>(this->pixel_offset_), static_cast<unsigned>(this->dib_header_size_));
+  return this->begin_load_selected_bmp_();
+}
+
+void RandomSdImage::block_prefetch_for(uint32_t duration_ms) {
+  this->prefetch_blocked_ = true;
+  this->cancel_timeout("prefetch_unblock");
+  ESP_LOGI(TAG, "Blocking image prefetch for %u ms while display refresh owns SPI", static_cast<unsigned>(duration_ms));
+  this->set_timeout("prefetch_unblock", duration_ms, [this]() {
+    this->prefetch_blocked_ = false;
+    ESP_LOGI(TAG, "Display cooldown finished; prefetch may resume");
+    this->ensure_prefetch();
+  });
+}
+
+void RandomSdImage::ensure_prefetch() {
+  if (this->prefetch_blocked_) {
+    ESP_LOGI(TAG, "Prefetch request deferred until display cooldown finishes");
+    return;
+  }
+  if (this->bmp_loading_) {
+    ESP_LOGI(TAG, "Prefetch already in progress: %s", this->selected_path_.c_str());
+    return;
+  }
+  if (this->bmp_loaded_ && this->pending_buffer_ != nullptr) {
+    ESP_LOGI(TAG, "Prefetch already ready: %s", this->selected_path_.c_str());
+    return;
+  }
+  if (this->start_next_image_load_()) {
+    ESP_LOGI(TAG, "Explicitly started image prefetch");
+  }
 }
 
 uint16_t RandomSdImage::quantize_pixel_(uint16_t rgb565, int x) {
@@ -218,6 +307,19 @@ bool RandomSdImage::begin_load_selected_bmp_() {
     return false;
   }
 
+  this->bmp_file_ = fopen(this->selected_path_.c_str(), "rb");
+  if (this->bmp_file_ == nullptr) {
+    ESP_LOGE(TAG, "Failed to open selected BMP for staged loading: %s", this->selected_path_.c_str());
+    this->reset_buffer_();
+    return false;
+  }
+
+  if (fseek(this->bmp_file_, static_cast<long>(this->pixel_offset_), SEEK_SET) != 0) {
+    ESP_LOGE(TAG, "Failed to seek to BMP pixel data");
+    this->reset_buffer_();
+    return false;
+  }
+
   this->bmp_loading_ = true;
   this->load_row_ = 0;
   ESP_LOGI(TAG, "Beginning staged BMP load into PSRAM: %s (%u bytes)", this->selected_path_.c_str(),
@@ -226,46 +328,22 @@ bool RandomSdImage::begin_load_selected_bmp_() {
 }
 
 bool RandomSdImage::continue_load_selected_bmp_() {
-  if (!this->bmp_loading_ || this->pending_buffer_ == nullptr) {
+  if (!this->bmp_loading_ || this->pending_buffer_ == nullptr || this->bmp_file_ == nullptr) {
     return this->bmp_loaded_;
   }
 
   const size_t frame_stride = static_cast<size_t>(this->width_) * 2;
   const size_t row_stride = this->get_row_stride_();
 
-  FILE *fp = fopen(this->selected_path_.c_str(), "rb");
-  if (fp == nullptr) {
-    ESP_LOGE(TAG, "Failed to open selected BMP for loading: %s", this->selected_path_.c_str());
-    this->reset_buffer_();
-    return false;
-  }
-
-  if (fseek(fp, static_cast<long>(this->pixel_offset_), SEEK_SET) != 0) {
-    ESP_LOGE(TAG, "Failed to seek to BMP pixel data");
-    fclose(fp);
-    this->reset_buffer_();
-    return false;
-  }
-
   uint8_t row_buffer[1604];
   const bool bottom_up = this->height_ > 0;
-  if (this->load_row_ > 0) {
-    const long skip = static_cast<long>(row_stride * this->load_row_);
-    if (fseek(fp, static_cast<long>(this->pixel_offset_) + skip, SEEK_SET) != 0) {
-      ESP_LOGE(TAG, "Failed to seek to staged BMP row %ld", static_cast<long>(this->load_row_));
-      fclose(fp);
-      this->reset_buffer_();
-      return false;
-    }
-  }
 
-  const int32_t rows_per_pass = 8;
+  const int32_t rows_per_pass = 24;
   const int32_t end_row = std::min(this->abs_height_, this->load_row_ + rows_per_pass);
   for (int32_t src_row = this->load_row_; src_row < end_row; src_row++) {
-    const size_t bytes_read = fread(row_buffer, 1, row_stride, fp);
+    const size_t bytes_read = fread(row_buffer, 1, row_stride, this->bmp_file_);
     if (bytes_read < row_stride) {
       ESP_LOGE(TAG, "Short read while loading BMP row %ld", static_cast<long>(src_row));
-      fclose(fp);
       this->reset_buffer_();
       return false;
     }
@@ -280,11 +358,12 @@ bool RandomSdImage::continue_load_selected_bmp_() {
     memset(this->error_next_, 0, static_cast<size_t>(this->width_) * 3 * sizeof(int16_t));
   }
 
-  fclose(fp);
   this->load_row_ = end_row;
   if (this->load_row_ >= this->abs_height_) {
     this->bmp_loaded_ = true;
     this->bmp_loading_ = false;
+    fclose(this->bmp_file_);
+    this->bmp_file_ = nullptr;
     ESP_LOGI(TAG, "Loaded BMP into PSRAM: %s (%u bytes)", this->selected_path_.c_str(),
              static_cast<unsigned>(this->pending_buffer_size_));
   }
@@ -292,25 +371,18 @@ bool RandomSdImage::continue_load_selected_bmp_() {
 }
 
 void RandomSdImage::request_refresh() {
-  if (this->storage_ == nullptr || !this->storage_->is_mounted()) {
-    ESP_LOGW(TAG, "Cannot refresh image because storage is not mounted");
+  if (this->bmp_loaded_ && this->pending_buffer_ != nullptr) {
+    ESP_LOGI(TAG, "Using prefetched image for refresh: %s", this->selected_path_.c_str());
     return;
   }
+
   if (this->bmp_loading_) {
-    ESP_LOGW(TAG, "Ignoring image refresh request while another load is in progress");
+    ESP_LOGI(TAG, "Refresh requested while prefetch is loading; will use it when ready: %s", this->selected_path_.c_str());
     return;
   }
-  this->selected_path_ = this->storage_->get_random_image_path();
-  if (this->selected_path_.empty()) {
-    ESP_LOGW(TAG, "No BMP files found in %s", this->directory_.c_str());
-    return;
-  }
-  ESP_LOGI(TAG, "Requested image refresh: %s", this->selected_path_.c_str());
-  if (this->read_selected_bmp_info_()) {
-    ESP_LOGI(TAG, "BMP info: %ldx%ld, %u bpp, pixel offset %u, DIB header %u",
-             static_cast<long>(this->width_), static_cast<long>(this->height_), this->bits_per_pixel_,
-             static_cast<unsigned>(this->pixel_offset_), static_cast<unsigned>(this->dib_header_size_));
-    this->begin_load_selected_bmp_();
+
+  if (this->start_next_image_load_()) {
+    ESP_LOGI(TAG, "Refresh requested with no cached image; loading a new one now");
   }
 }
 
@@ -328,6 +400,7 @@ void RandomSdImage::commit_refresh() {
   this->pending_buffer_size_ = 0;
   this->committed_ready_ = true;
   this->bmp_loaded_ = false;
+  this->committed_path_ = this->selected_path_;
   ESP_LOGI(TAG, "Committed image frame: %s", this->selected_path_.c_str());
 }
 
@@ -343,6 +416,11 @@ bool RandomSdImage::draw_committed(display::Display &display) {
 void RandomSdImage::loop() {
   if (this->bmp_loading_) {
     this->continue_load_selected_bmp_();
+    return;
+  }
+
+  if (!this->bmp_loaded_ && this->pending_buffer_ == nullptr) {
+    this->ensure_prefetch();
   }
 }
 
@@ -350,9 +428,7 @@ void RandomSdImage::setup() {
   ESP_LOGI(TAG, "Random SD image setup");
   if (this->storage_ == nullptr || !this->storage_->is_mounted()) {
     ESP_LOGW(TAG, "Storage is not mounted yet");
-    return;
   }
-  this->request_refresh();
 }
 
 void RandomSdImage::dump_config() {
@@ -363,6 +439,7 @@ void RandomSdImage::dump_config() {
   ESP_LOGCONFIG(TAG, "  BMP header valid: %s", this->bmp_valid_ ? "yes" : "no");
   ESP_LOGCONFIG(TAG, "  BMP loaded: %s", this->bmp_loaded_ ? "yes" : "no");
   ESP_LOGCONFIG(TAG, "  Committed frame ready: %s", this->committed_ready_ ? "yes" : "no");
+  ESP_LOGCONFIG(TAG, "  Prefetch blocked: %s", this->prefetch_blocked_ ? "yes" : "no");
   if (this->bmp_valid_) {
     ESP_LOGCONFIG(TAG, "  Width: %ld", static_cast<long>(this->width_));
     ESP_LOGCONFIG(TAG, "  Height: %ld", static_cast<long>(this->height_));
