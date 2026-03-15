@@ -148,7 +148,6 @@ void RandomSdImage::block_prefetch_for(uint32_t duration_ms) {
 
 void RandomSdImage::ensure_prefetch() {
   if (this->prefetch_blocked_) {
-    ESP_LOGI(TAG, "Prefetch request deferred until display cooldown finishes");
     return;
   }
   if (this->bmp_loading_) {
