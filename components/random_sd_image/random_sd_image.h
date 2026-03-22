@@ -17,6 +17,7 @@ class RandomSdImage : public Component {
  public:
   void set_storage(spi_sd_storage::SpiSdStorage *storage) { this->storage_ = storage; }
   void set_directory(const std::string &directory) { this->directory_ = directory; }
+  void set_prefetch_enabled(bool enabled) { this->prefetch_enabled_ = enabled; }
 
   void block_prefetch_for(uint32_t duration_ms);
   void ensure_prefetch();
@@ -56,6 +57,7 @@ class RandomSdImage : public Component {
   bool bmp_loaded_{false};
   bool bmp_loading_{false};
   bool committed_ready_{false};
+  bool prefetch_enabled_{true};
   bool prefetch_blocked_{false};
   int32_t width_{0};
   int32_t height_{0};

@@ -147,6 +147,9 @@ void RandomSdImage::block_prefetch_for(uint32_t duration_ms) {
 }
 
 void RandomSdImage::ensure_prefetch() {
+  if (!this->prefetch_enabled_) {
+    return;
+  }
   if (this->prefetch_blocked_) {
     return;
   }
@@ -418,7 +421,7 @@ void RandomSdImage::loop() {
     return;
   }
 
-  if (!this->bmp_loaded_ && this->pending_buffer_ == nullptr) {
+  if (this->prefetch_enabled_ && !this->bmp_loaded_ && this->pending_buffer_ == nullptr) {
     this->ensure_prefetch();
   }
 }
@@ -438,6 +441,7 @@ void RandomSdImage::dump_config() {
   ESP_LOGCONFIG(TAG, "  BMP header valid: %s", this->bmp_valid_ ? "yes" : "no");
   ESP_LOGCONFIG(TAG, "  BMP loaded: %s", this->bmp_loaded_ ? "yes" : "no");
   ESP_LOGCONFIG(TAG, "  Committed frame ready: %s", this->committed_ready_ ? "yes" : "no");
+  ESP_LOGCONFIG(TAG, "  Prefetch enabled: %s", this->prefetch_enabled_ ? "yes" : "no");
   ESP_LOGCONFIG(TAG, "  Prefetch blocked: %s", this->prefetch_blocked_ ? "yes" : "no");
   if (this->bmp_valid_) {
     ESP_LOGCONFIG(TAG, "  Width: %ld", static_cast<long>(this->width_));
