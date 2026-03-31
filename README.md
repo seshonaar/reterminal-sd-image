@@ -8,6 +8,8 @@ Custom ESPHome external components for the Seeed `reTerminal E1002` to:
 - load it in chunks outside the display callback
 - commit exactly one finished frame for one e-paper refresh
 
+<img title="photo" alt="Alt text" src="reterminal_example.jpg">
+
 ## Status
 
 This project now mounts the SD card over SPI, scans `/images` for BMP files, and loads one random image into PSRAM with Spectra 6 palette mapping plus dithering.
