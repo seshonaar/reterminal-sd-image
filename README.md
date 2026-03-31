@@ -12,12 +12,6 @@ Custom ESPHome external components for the Seeed `reTerminal E1002` to:
 
 This project now mounts the SD card over SPI, scans `/images` for BMP files, and loads one random image into PSRAM with Spectra 6 palette mapping plus dithering.
 
-Planned milestones:
-
-1. Integrate the component into the `joke.yaml` transaction flow.
-2. Add a companion joke/text coordinator that waits for both image and content.
-3. Trigger exactly one screen refresh after image commit plus joke commit.
-
 ## Hardware Notes
 
 The reTerminal E1002 schematic shows these microSD SPI signals:
