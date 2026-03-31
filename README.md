@@ -32,15 +32,6 @@ The reTerminal E1002 schematic shows these microSD SPI signals:
 - `examples/reterminal_e1002_test.yaml` - integration example
 - `examples/joke.yaml` - practical application that displays an image from the sdcard and overlays a joke on top
 
-## Next Step
-
-Use the transaction-style API from `random_sd_image`:
-
-- `request_refresh()` starts a new random image load
-- `has_pending_frame()` reports when the next frame is ready
-- `commit_refresh()` swaps the finished frame into the committed slot
-- `draw_committed(display)` draws only the committed frame
-
 This is designed so one manual or scheduled trigger can lead to one final e-paper refresh.
 
 ## Example
