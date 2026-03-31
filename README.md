@@ -34,6 +34,7 @@ The reTerminal E1002 schematic shows these microSD SPI signals:
 - `components/spi_sd_storage/` - SD mount and file enumeration
 - `components/random_sd_image/` - random BMP selection, staged load, palette mapping, and committed-frame draw pipeline
 - `examples/reterminal_e1002_test.yaml` - integration example
+- `examples/joke.yaml` - practical application that displays an image from the sdcard and overlays a joke on top
 
 ## Next Step
 

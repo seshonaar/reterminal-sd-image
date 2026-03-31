@@ -1,0 +1,430 @@
+esphome:
+  name: reterminal-e1002
+  on_boot:
+    priority: 800
+    then:
+      - output.turn_off: buzzer_out
+      - lambda: |-
+          id(booted_from_button_wakeup) = false;
+          id(interactive_mode) = false;
+          id(sleep_after_refresh) = true;
+          id(bg_loader).set_prefetch_enabled(false);
+          const auto cause = esp_sleep_get_wakeup_cause();
+          if (cause == ESP_SLEEP_WAKEUP_EXT0 || cause == ESP_SLEEP_WAKEUP_EXT1) {
+            id(booted_from_button_wakeup) = true;
+          }
+      - if:
+          condition:
+            lambda: return id(booted_from_button_wakeup);
+          then:
+            - logger.log: "Booted from green button wakeup -> enabling burst mode"
+            - script.execute: enter_burst_mode
+          else:
+            - logger.log: "Booted for scheduled or cold start refresh"
+      - script.execute: refresh_content
+
+esp32:
+  board: esp32-s3-devkitc-1
+  framework:
+    type: esp-idf
+    advanced:
+      disable_vfs_support_dir: false
+      include_builtin_idf_components:
+        - fatfs
+        - sdmmc
+        - esp_driver_sdspi
+        - esp_driver_spi
+
+psram:
+  mode: octal
+  speed: 80MHz
+
+external_components:
+  - source:
+      type: local
+      path: ../reterminal-sd-image/components
+    components: [spi_sd_storage, random_sd_image]
+
+wifi:
+  networks:
+    - ssid: !secret wifi_ssid
+      password: !secret wifi_password
+
+  power_save_mode: light
+  fast_connect: true
+
+  ap:
+    ssid: "Reterminal Fallback"
+    password: !secret fallback_ap_password
+
+captive_portal:
+
+logger:
+  baud_rate: 115200
+  hardware_uart: UART0
+
+improv_serial:
+
+api:
+  reboot_timeout: 0s
+
+ota:
+  - platform: esphome
+
+deep_sleep:
+  id: deep_sleep_ctrl
+  run_duration: 10min
+  sleep_duration: 24h
+  wakeup_pin:
+    number: GPIO3
+    allow_other_uses: true
+  wakeup_pin_mode: INVERT_WAKEUP
+
+output:
+  - platform: gpio
+    pin: GPIO45
+    id: buzzer_out
+  - platform: gpio
+    pin: GPIO6
+    id: onboard_led_output
+    inverted: true
+
+light:
+  - platform: binary
+    id: onboard_led
+    output: onboard_led_output
+
+button:
+  - platform: restart
+    id: restart_device_button
+
+binary_sensor:
+  - platform: gpio
+    pin:
+      number: GPIO3
+      mode: INPUT_PULLUP
+      inverted: true
+      allow_other_uses: true
+    id: green_button
+    name: "Green Button"
+    on_multi_click:
+      - timing:
+          - ON for at most 500ms
+          - OFF for at least 50ms
+        then:
+          - light.turn_on: onboard_led
+          - logger.log: "Green button short press detected"
+          - script.execute: enter_burst_mode
+          - if:
+              condition:
+                lambda: return !id(refresh_requested) && !id(fetch_in_progress);
+              then:
+                - logger.log: "Green button accepted -> executing refresh_content"
+                - script.execute: refresh_content
+              else:
+                - logger.log: "Green button ignored because refresh is already in progress"
+          - delay: 300ms
+          - light.turn_off: onboard_led
+      - timing:
+          - ON for at least 1s
+        then:
+          - button.press: restart_device_button
+
+globals:
+  - id: fetch_in_progress
+    type: bool
+    restore_value: no
+    initial_value: "false"
+  - id: refresh_requested
+    type: bool
+    restore_value: no
+    initial_value: "false"
+  - id: joke_result_ready
+    type: bool
+    restore_value: no
+    initial_value: "false"
+  - id: interactive_mode
+    type: bool
+    restore_value: no
+    initial_value: "false"
+  - id: sleep_after_refresh
+    type: bool
+    restore_value: no
+    initial_value: "true"
+  - id: booted_from_button_wakeup
+    type: bool
+    restore_value: no
+    initial_value: "false"
+  - id: pending_joke_text
+    type: std::string
+    restore_value: no
+    initial_value: '""'
+
+spi:
+  clk_pin: GPIO7
+  mosi_pin: GPIO9
+  miso_pin: GPIO8
+
+spi_sd_storage:
+  id: sd_storage
+  clk_pin: 7
+  miso_pin: 8
+  mosi_pin: 9
+  cs_pin: 14
+  enable_pin: 16
+  detect_pin: 15
+
+random_sd_image:
+  id: bg_loader
+  storage_id: sd_storage
+  directory: /images
+
+http_request:
+  useragent: esphome/reterminal
+  timeout: 30s
+  verify_ssl: false
+
+sensor:
+
+text_sensor:
+  - platform: template
+    id: current_joke
+    name: "Current Joke"
+    update_interval: never
+
+script:
+  - id: enter_burst_mode
+    mode: restart
+    then:
+      - lambda: |-
+          id(interactive_mode) = true;
+          id(sleep_after_refresh) = false;
+          id(bg_loader).set_prefetch_enabled(true);
+      - logger.log: "Interactive burst mode enabled for quick successive refreshes"
+      - script.execute: schedule_idle_sleep
+
+  - id: schedule_idle_sleep
+    mode: restart
+    then:
+      - delay: 2min
+      - wait_until:
+          condition:
+            lambda: return !id(refresh_requested) && !id(fetch_in_progress) && !id(bg_loader).is_loading();
+      - if:
+          condition:
+            lambda: return id(interactive_mode);
+          then:
+            - logger.log: "Burst mode idle timeout reached -> entering deep sleep"
+            - script.execute: enter_sleep
+
+  - id: enter_sleep
+    mode: single
+    then:
+      - logger.log: "Preparing to enter deep sleep"
+      - lambda: |-
+          id(interactive_mode) = false;
+          id(sleep_after_refresh) = false;
+          id(bg_loader).set_prefetch_enabled(false);
+      - delay: 200ms
+      - deep_sleep.enter: deep_sleep_ctrl
+
+  - id: refresh_content
+    mode: restart
+    then:
+      - if:
+          condition:
+            lambda: return !id(refresh_requested) && !id(fetch_in_progress);
+          then:
+            - logger.log: "refresh_content accepted -> starting joke/image transaction"
+            - lambda: |-
+                id(refresh_requested) = true;
+                id(joke_result_ready) = false;
+                id(pending_joke_text).clear();
+                id(bg_loader).request_refresh();
+            - script.execute: fetch_joke
+          else:
+            - logger.log: "refresh_content ignored because transaction is already active"
+
+  - id: fetch_joke
+    mode: restart
+    then:
+      - lambda: |-
+          id(fetch_in_progress) = true;
+      - if:
+          condition:
+            not:
+              wifi.connected:
+          then:
+            - logger.log: "Waiting briefly for Wi-Fi before fetching joke"
+            - wait_until:
+                condition:
+                  wifi.connected:
+                timeout: 15s
+      - if:
+          condition:
+            wifi.connected:
+          then:
+            - logger.log: "fetch_joke running with Wi-Fi connected"
+            - http_request.get:
+                url: https://icanhazdadjoke.com/
+                capture_response: true
+                request_headers:
+                  Accept: text/plain
+                on_response:
+                  then:
+                    - logger.log: "fetch_joke completed with HTTP response"
+                    - lambda: |-
+                        id(fetch_in_progress) = false;
+                        if (response->status_code == 200 && !body.empty()) {
+                          id(pending_joke_text) = body;
+                        } else {
+                          id(pending_joke_text).clear();
+                        }
+                        id(joke_result_ready) = true;
+                on_error:
+                  then:
+                    - logger.log: "fetch_joke failed; continuing with empty joke"
+                    - lambda: |-
+                        id(fetch_in_progress) = false;
+                        id(pending_joke_text).clear();
+                        id(joke_result_ready) = true;
+          else:
+            - logger.log: "fetch_joke skipped because Wi-Fi did not connect in time"
+            - lambda: |-
+                id(fetch_in_progress) = false;
+                id(pending_joke_text).clear();
+                id(joke_result_ready) = true;
+
+interval:
+  - interval: 500ms
+    then:
+      - if:
+          condition:
+            lambda: |-
+              return id(refresh_requested) && id(joke_result_ready) &&
+                     (id(bg_loader).has_pending_frame() || (!id(bg_loader).is_loading() && id(bg_loader).is_ready()));
+          then:
+            - logger.log: "Committing ready transaction and updating e-paper display"
+            - lambda: |-
+                if (id(bg_loader).has_pending_frame()) {
+                  id(bg_loader).commit_refresh();
+                }
+                id(current_joke).publish_state(id(pending_joke_text));
+                id(refresh_requested) = false;
+                id(joke_result_ready) = false;
+            - component.update: epaper_display
+            - if:
+                condition:
+                  lambda: return id(interactive_mode);
+                then:
+                  - lambda: |-
+                      id(bg_loader).block_prefetch_for(21000);
+                  - script.execute: schedule_idle_sleep
+                else:
+                  - if:
+                      condition:
+                        lambda: return id(sleep_after_refresh);
+                      then:
+                        - script.execute: enter_sleep
+
+display:
+  - platform: epaper_spi
+    id: epaper_display
+    model: Seeed-reTerminal-E1002
+    update_interval: never
+    lambda: |-
+      if (!id(bg_loader).draw_committed(it)) {
+        it.fill(Color(255, 255, 255));
+      }
+
+      auto body_font = id(my_font);
+      auto joke_text = id(current_joke).state;
+      const int body_x = 24;
+      int body_y = 100;
+      const int line_height = 30;
+      const int max_lines = 10;
+      const size_t max_chars_per_line = 56;
+
+      if (joke_text.empty()) {
+        return;
+      }
+
+      std::string normalized = joke_text;
+      for (size_t i = 0; i < normalized.size(); i++) {
+        if (normalized[i] == '\n' || normalized[i] == '\r' || normalized[i] == '\t') {
+          normalized[i] = ' ';
+        }
+      }
+
+      std::string line;
+      std::string word;
+      int lines_drawn = 0;
+
+      auto flush_line = [&](bool final_line) {
+        if (!line.empty() && lines_drawn < max_lines) {
+          std::string output = line;
+          if (final_line && !word.empty()) {
+            if (!output.empty()) {
+              output += " ";
+            }
+            output += word;
+            word.clear();
+          }
+          it.printf(body_x + 2, body_y, body_font, Color(255, 255, 255), "%s", output.c_str());
+          it.printf(body_x, body_y + 2, body_font, Color(255, 255, 255), "%s", output.c_str());
+          it.printf(body_x - 2, body_y, body_font, Color(255, 255, 255), "%s", output.c_str());
+          it.printf(body_x, body_y - 2, body_font, Color(255, 255, 255), "%s", output.c_str());
+          it.printf(body_x, body_y, body_font, Color(0, 0, 0), "%s", output.c_str());
+          body_y += line_height;
+          lines_drawn++;
+          line.clear();
+        }
+      };
+
+      for (size_t i = 0; i <= normalized.size(); i++) {
+        const bool at_end = i == normalized.size();
+        const char c = at_end ? ' ' : normalized[i];
+
+        if (c == ' ') {
+          if (!word.empty()) {
+            std::string candidate = line.empty() ? word : line + " " + word;
+            if (candidate.size() <= max_chars_per_line) {
+              line = candidate;
+            } else {
+              flush_line(false);
+              if (word.size() <= max_chars_per_line) {
+                line = word;
+              } else {
+                size_t start = 0;
+                while (start < word.size() && lines_drawn < max_lines) {
+                  std::string chunk = word.substr(start, max_chars_per_line);
+                  it.printf(body_x + 2, body_y + 2, body_font, Color(243, 193, 59), "%s", chunk.c_str());
+                  it.printf(body_x, body_y, body_font, Color(0, 0, 0), "%s", chunk.c_str());
+                  body_y += line_height;
+                  lines_drawn++;
+                  start += max_chars_per_line;
+                }
+                line.clear();
+              }
+            }
+            word.clear();
+          }
+        } else {
+          word += c;
+        }
+
+        if (lines_drawn >= max_lines) {
+          break;
+        }
+      }
+
+      flush_line(true);
+
+      if ((line.empty() && !word.empty()) || (!line.empty() && lines_drawn >= max_lines)) {
+        it.printf(720, 448, body_font, Color(0, 0, 0), "...");
+      }
+
+font:
+  - file: "gfonts://Roboto"
+    id: my_font
+    size: 28
